@@ -45,3 +45,9 @@ bun.lock
 .claude/memory/
 career-dashboard
 package-lock.json
+
+# Personal job-search work product (Adnan additions)
+article-digest.md
+batch/build-tailored-cv.mjs
+batch/cv-*.json
+interview-prep/

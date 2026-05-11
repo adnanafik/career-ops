@@ -13,6 +13,9 @@
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
  *   node scan.mjs --company Cohere # scan a single company
+ *
+ * v2 (2026-05-11): Added location_filter support to drop non-US roles
+ *                  (was returning Dubai, Tel Aviv, Singapore, etc.).
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
@@ -131,6 +134,65 @@ function buildTitleFilter(titleFilter) {
     const hasPositive = positive.length === 0 || positive.some(k => lower.includes(k));
     const hasNegative = negative.some(k => lower.includes(k));
     return hasPositive && !hasNegative;
+  };
+}
+
+// ── Location filter (v2) ────────────────────────────────────────────
+//
+// Reads `location_filter` block from portals.yml. Drops jobs whose
+// location field signals a non-US posting. Tuned to be conservative —
+// when in doubt about a location string, KEEP the job rather than drop
+// (the human can prune downstream), unless it explicitly matches a deny term.
+//
+// Match logic:
+//   1. Empty/null location → use config.empty_policy (default: "allow")
+//   2. Location matches any DENY substring → reject (overrides allow)
+//   3. Location matches any ALLOW substring → keep
+//   4. Otherwise → reject
+//
+// Terms shorter than 4 chars (US, UK, EU, etc.) are matched with word
+// boundaries to avoid catching "Aug-US-t" or similar accidents.
+
+function buildLocationFilter(locationFilter) {
+  if (!locationFilter) {
+    // No config block — pass everything through (backward-compatible).
+    return () => true;
+  }
+
+  const allow = (locationFilter.allow || []).map(k => k.toLowerCase());
+  const deny = (locationFilter.deny || []).map(k => k.toLowerCase());
+  const emptyPolicy = (locationFilter.empty_policy || 'allow').toLowerCase();
+
+  // For short tokens (≤3 chars), require word boundary. Avoids "us" matching
+  // "August", "eu" matching "europe" in a way that's too loose, etc.
+  function matches(haystack, needles) {
+    for (const n of needles) {
+      if (n.length <= 3) {
+        // Word-boundary match: \bus\b style
+        const re = new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (re.test(haystack)) return true;
+      } else {
+        if (haystack.includes(n)) return true;
+      }
+    }
+    return false;
+  }
+
+  return (location) => {
+    const loc = (location || '').toLowerCase().trim();
+
+    if (loc === '') {
+      return emptyPolicy === 'allow';
+    }
+
+    // Deny first — any deny match rejects, even if allow also matches.
+    if (matches(loc, deny)) return false;
+
+    // Then allow.
+    if (matches(loc, allow)) return true;
+
+    // No allow match and no deny match → reject (US-only stance).
+    return false;
   };
 }
 
@@ -264,6 +326,7 @@ async function main() {
   const config = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
+  const locationFilter = buildLocationFilter(config.location_filter);
 
   // 2. Filter to enabled companies with detectable APIs
   const targets = companies
@@ -285,6 +348,7 @@ async function main() {
   const date = new Date().toISOString().slice(0, 10);
   let totalFound = 0;
   let totalFiltered = 0;
+  let totalFilteredByLocation = 0;
   let totalDupes = 0;
   const newOffers = [];
   const errors = [];
@@ -299,6 +363,10 @@ async function main() {
       for (const job of jobs) {
         if (!titleFilter(job.title)) {
           totalFiltered++;
+          continue;
+        }
+        if (!locationFilter(job.location)) {
+          totalFilteredByLocation++;
           continue;
         }
         if (seenUrls.has(job.url)) {
@@ -335,6 +403,7 @@ async function main() {
   console.log(`Companies scanned:     ${targets.length}`);
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFiltered} removed`);
+  console.log(`Filtered by location:  ${totalFilteredByLocation} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
   console.log(`New offers added:      ${newOffers.length}`);
 
